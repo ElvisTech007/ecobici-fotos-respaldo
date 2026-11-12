@@ -1,0 +1,54 @@
+# Respaldo de la captura de Ecobici. Vive en un repositorio público APARTE, solo de datos.
+# Corre en los servidores de GitHub, así que no depende de la laptop ni de la red de casa.
+# GitHub no garantiza la puntualidad del cron: puede retrasarse u omitir corridas.
+name: captura-respaldo
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: captura
+  cancel-in-progress: false
+
+jobs:
+  capturar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Tomar la foto
+        run: |
+          set -euo pipefail
+          base=https://gbfs.mex.lyftbikes.com/gbfs/en
+          marca=$(date -u +%Y%m%dT%H%M%SZ)
+          carpeta=estado/$(date -u +%Y-%m-%d)
+          mkdir -p "$carpeta"
+          curl -sS --fail --compressed --retry 3 --retry-delay 5 --max-time 20 \
+            -o foto.json "$base/station_status.json"
+          # Se descarta la respuesta si no trae al menos 100 estaciones.
+          test "$(jq '.data.stations | length' foto.json)" -ge 100
+          gzip -c foto.json > "$carpeta/estado_${marca}.json.gz"
+          catalogo="$carpeta/catalogo_$(date -u +%Y%m%dT%H)Z.json.gz"
+          if [ ! -f "$catalogo" ]; then
+            curl -sS --fail --compressed --retry 3 --max-time 20 \
+              -o catalogo.json "$base/station_information.json"
+            gzip -c catalogo.json > "$catalogo"
+          fi
+          rm -f foto.json catalogo.json
+
+      - name: Guardar en el repositorio
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add estado
+          git commit -q -m "foto $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q
