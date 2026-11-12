@@ -1,11 +1,12 @@
 # Respaldo de la captura de Ecobici. Vive en un repositorio público APARTE, solo de datos.
 # Corre en los servidores de GitHub, así que no depende de la laptop ni de la red de casa.
 # GitHub no garantiza la puntualidad del cron: puede retrasarse u omitir corridas.
+# Se usa el minuto 3 (y no el 0) porque en las horas en punto hay más carga y más omisiones.
 name: captura-respaldo
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "3-59/5 * * * *"
   workflow_dispatch:
 
 permissions:
