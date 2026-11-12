@@ -1,17 +1,22 @@
 # Respaldo de la captura de Ecobici. Vive en un repositorio público APARTE, solo de datos.
 # Corre en los servidores de GitHub, así que no depende de la laptop ni de la red de casa.
-# GitHub no garantiza la puntualidad del cron: puede retrasarse u omitir corridas.
-# Se usa el minuto 3 (y no el 0) porque en las horas en punto hay más carga y más omisiones.
+#
+# El cron de GitHub resultó no ser confiable (en las primeras horas no se disparó ni una
+# vez). Por eso el flujo se encadena solo: cada corrida toma una foto cada 5 minutos
+# durante unas 5.5 horas y, al terminar, lanza la siguiente corrida. El cron queda solo
+# como arranque de emergencia por si la cadena se rompe.
 name: captura-respaldo
 
 on:
   schedule:
-    - cron: "3-59/5 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
 
+# Una sola corrida a la vez; si llega otra mientras tanto, espera a que termine la actual.
 concurrency:
   group: captura
   cancel-in-progress: false
@@ -19,37 +24,50 @@ concurrency:
 jobs:
   capturar:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Tomar la foto
+      - name: Tomar una foto cada 5 minutos
         run: |
-          set -euo pipefail
-          base=https://gbfs.mex.lyftbikes.com/gbfs/en
-          marca=$(date -u +%Y%m%dT%H%M%SZ)
-          carpeta=estado/$(date -u +%Y-%m-%d)
-          mkdir -p "$carpeta"
-          curl -sS --fail --compressed --retry 3 --retry-delay 5 --max-time 20 \
-            -o foto.json "$base/station_status.json"
-          # Se descarta la respuesta si no trae al menos 100 estaciones.
-          test "$(jq '.data.stations | length' foto.json)" -ge 100
-          gzip -c foto.json > "$carpeta/estado_${marca}.json.gz"
-          catalogo="$carpeta/catalogo_$(date -u +%Y%m%dT%H)Z.json.gz"
-          if [ ! -f "$catalogo" ]; then
-            curl -sS --fail --compressed --retry 3 --max-time 20 \
-              -o catalogo.json "$base/station_information.json"
-            gzip -c catalogo.json > "$catalogo"
-          fi
-          rm -f foto.json catalogo.json
-
-      - name: Guardar en el repositorio
-        run: |
-          set -euo pipefail
+          set -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add estado
-          git commit -q -m "foto $(date -u +%Y-%m-%dT%H:%MZ)"
-          git push -q
+          base=https://gbfs.mex.lyftbikes.com/gbfs/en
+          fin=$(( $(date +%s) + 330*60 ))
+          while [ "$(date +%s)" -lt "$fin" ]; do
+            inicio=$(date +%s)
+            marca=$(date -u +%Y%m%dT%H%M%SZ)
+            carpeta=estado/$(date -u +%Y-%m-%d)
+            mkdir -p "$carpeta"
+            # Una foto fallida no detiene la cadena: se anota y se sigue.
+            if curl -sS --fail --compressed --retry 3 --retry-delay 5 --max-time 20 \
+                 -o /tmp/foto.json "$base/station_status.json" \
+               && [ "$(jq '.data.stations | length' /tmp/foto.json)" -ge 100 ]; then
+              gzip -c /tmp/foto.json > "$carpeta/estado_${marca}.json.gz"
+              catalogo="$carpeta/catalogo_$(date -u +%Y%m%dT%H)Z.json.gz"
+              if [ ! -f "$catalogo" ] && curl -sS --fail --compressed --retry 3 --max-time 20 \
+                   -o /tmp/catalogo.json "$base/station_information.json"; then
+                gzip -c /tmp/catalogo.json > "$catalogo"
+              fi
+              git add estado
+              git commit -q -m "foto $(date -u +%Y-%m-%dT%H:%MZ)" \
+                && { git push -q || { git pull -q --rebase && git push -q; }; } \
+                || echo "::warning::no se pudo guardar la foto $marca"
+            else
+              echo "::warning::foto fallida $marca"
+            fi
+            espera=$(( 300 - ($(date +%s) - inicio) ))
+            [ "$espera" -gt 0 ] && sleep "$espera"
+          done
+
+      - name: Lanzar la siguiente corrida
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Si la corrida falló pronto, se espera antes de relanzar para no girar en vacío.
+          sleep 60
+          gh workflow run captura.yml --repo "$GITHUB_REPOSITORY" --ref main
