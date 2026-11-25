@@ -2,8 +2,8 @@
 # Corre en los servidores de GitHub, así que no depende de la laptop ni de la red de casa.
 #
 # El cron de GitHub resultó no ser confiable (en las primeras horas no se disparó ni una
-# vez). Por eso el flujo se encadena solo: cada corrida toma una foto cada 5 minutos
-# durante unas 5.5 horas y, al terminar, lanza la siguiente corrida. El cron queda solo
+# vez). Por eso el flujo se encadena solo: cada corrida toma una foto cada minuto (desde el
+# 24 nov de 2026; antes, cada 5) durante unas 5.5 horas y, al terminar, lanza la siguiente corrida. El cron queda solo
 # como arranque de emergencia por si la cadena se rompe.
 name: captura-respaldo
 
@@ -30,38 +30,47 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Tomar una foto cada 5 minutos
+      - name: Tomar una foto cada minuto
         run: |
           set -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           base=https://gbfs.mex.lyftbikes.com/gbfs/en
           fin=$(( $(date +%s) + 330*60 ))
+          pendientes=0
+          guardar() {
+            # Un commit cada 5 fotos (cada 5 minutos) para no llenar el historial de commits.
+            git add estado
+            git commit -q -m "fotos hasta $(date -u +%Y-%m-%dT%H:%MZ)" \
+              && { git push -q || { git pull -q --rebase && git push -q; }; } \
+              || echo "::warning::no se pudieron guardar las fotos de $(date -u +%H:%MZ)"
+            pendientes=0
+          }
           while [ "$(date +%s)" -lt "$fin" ]; do
             inicio=$(date +%s)
             marca=$(date -u +%Y%m%dT%H%M%SZ)
             carpeta=estado/$(date -u +%Y-%m-%d)
             mkdir -p "$carpeta"
             # Una foto fallida no detiene la cadena: se anota y se sigue.
-            if curl -sS --fail --compressed --retry 3 --retry-delay 5 --max-time 20 \
+            if curl -sS --fail --compressed --retry 2 --retry-delay 3 --max-time 15 \
                  -o /tmp/foto.json "$base/station_status.json" \
                && [ "$(jq '.data.stations | length' /tmp/foto.json)" -ge 100 ]; then
               gzip -c /tmp/foto.json > "$carpeta/estado_${marca}.json.gz"
               catalogo="$carpeta/catalogo_$(date -u +%Y%m%dT%H)Z.json.gz"
-              if [ ! -f "$catalogo" ] && curl -sS --fail --compressed --retry 3 --max-time 20 \
+              if [ ! -f "$catalogo" ] && curl -sS --fail --compressed --retry 2 --max-time 15 \
                    -o /tmp/catalogo.json "$base/station_information.json"; then
                 gzip -c /tmp/catalogo.json > "$catalogo"
               fi
-              git add estado
-              git commit -q -m "foto $(date -u +%Y-%m-%dT%H:%MZ)" \
-                && { git push -q || { git pull -q --rebase && git push -q; }; } \
-                || echo "::warning::no se pudo guardar la foto $marca"
+              pendientes=$(( pendientes + 1 ))
             else
               echo "::warning::foto fallida $marca"
             fi
-            espera=$(( 300 - ($(date +%s) - inicio) ))
+            if [ "$pendientes" -ge 5 ]; then guardar; fi
+            espera=$(( 60 - ($(date +%s) - inicio) ))
             [ "$espera" -gt 0 ] && sleep "$espera"
           done
+          if [ "$pendientes" -gt 0 ]; then guardar; fi
+          exit 0
 
       - name: Lanzar la siguiente corrida
         if: always()
